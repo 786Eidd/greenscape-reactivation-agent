@@ -44,7 +44,7 @@ Generation and sending are **separate endpoints separated by a database status**
 |---|---|---|
 | Framework | Next.js 14 (App Router) | API routes and admin UI in one deployable. For a 24-hour build, one repo that ships to Vercel in minutes beats a split frontend/backend. |
 | Database | Supabase (Postgres) | Real relational persistence with FK constraints and CHECK constraints doing actual work — `messages.status` is enforced by the database, not by hope. RLS on, no public policies. |
-| Model | **Claude Haiku** | Short, high-volume, tightly-constrained drafting with a human reviewing every output. Sonnet/Opus buy reasoning depth this task does not need. At 1,400 leads the tier choice is the difference between drafting the whole backlog for pocket change and doing it for real money. |
+| Model | **A small, fast tier** — Claude Haiku or Gemini Flash, behind one interface | Short, high-volume, tightly-constrained drafting with a human reviewing every output. Frontier models buy reasoning depth this task does not need, and across 1,400 leads the tier choice is the entire cost story. The drafting layer is provider-agnostic (`AI_PROVIDER=anthropic\|gemini`): the prompt, the guardrails and the cost accounting are identical either way, because the opinionated part of this agent is the system prompt and the validation around it, not the vendor. Claude Haiku is the intended production model; the live demo runs on Gemini Flash. |
 | Email | Resend | Requires one verified domain. Twilio SMS is closer to how Greenscape actually reaches people through GHL, but A2P 10DLC registration takes days and cannot be demoed inside 24 hours. `src/lib/email.ts` is channel-shaped so a GHL SMS swap is a one-file change. |
 | Notification | Slack incoming webhook | Makes human-in-the-loop real. "A human approves everything" means nothing if that human is expected to remember to open a dashboard — especially this founder, who is already the bottleneck. |
 
@@ -72,12 +72,15 @@ Run it before every deploy. It has already caught one real defect: `$28,000` sli
 
 ## Cost
 
-Haiku, ~450 input tokens + ~180 output tokens per draft.
+~450 input tokens + ~180 output tokens per draft, at a small-tier model.
+
+Because the provider is swappable, so is the price: the deployed demo runs on Gemini Flash's free tier at literally zero, and the same code on Claude Haiku costs what the table below shows. Per-draft token counts and cost are recorded on every `messages` row and shown in the UI, so the figure is measured rather than asserted.
 
 | | |
 |---|---|
-| Per draft | **well under $0.01** |
-| Whole 1,400-lead backlog | **under $10**, one pass |
+| Per draft (Claude Haiku) | **well under $0.01** |
+| Whole 1,400-lead backlog (Haiku) | **under $10**, one pass |
+| Same backlog on Gemini Flash free tier | **$0** |
 | Against | ~$784K of latent pipeline |
 
 Live token counts and per-draft cost are recorded on every `messages` row and shown in the UI, so the number is measured rather than asserted. Pricing is configurable via `ANTHROPIC_INPUT_COST_PER_MTOK` / `ANTHROPIC_OUTPUT_COST_PER_MTOK`.

@@ -4,35 +4,67 @@ import { LOST_REASON_LABEL } from "./types";
 import { MAX_BODY_CHARS } from "./guardrails";
 
 /**
- * Model choice.
+ * Drafting layer.
  *
- * Haiku, not Sonnet or Opus. This is a short, high-volume, tightly-constrained
- * drafting task with a human reading every output before it goes anywhere. The
- * expensive tiers buy reasoning depth this job does not need, and the backlog
- * is 1,400 leads — the cost difference is the difference between drafting the
- * whole backlog for the price of a coffee and drafting it for the price of a
- * dinner. Overridable via ANTHROPIC_MODEL.
+ * Deliberately provider-agnostic. The prompt, the guardrails and the cost
+ * accounting are identical whichever model runs; only the transport differs.
+ * That matters because the expensive, opinionated part of this agent is the
+ * system prompt and the validation around it, not the vendor.
+ *
+ * MODEL CHOICE: a small, fast tier (Claude Haiku / Gemini Flash), not a
+ * frontier model. This is short, tightly-constrained drafting with a human
+ * reading every output before it goes anywhere. The reasoning depth of a
+ * larger model buys nothing here, and across a 1,400-lead backlog the tier
+ * choice is the entire cost story.
+ *
+ * Set AI_PROVIDER=anthropic or AI_PROVIDER=gemini. If unset, whichever API
+ * key is present wins, preferring Anthropic.
  */
-export const MODEL = process.env.ANTHROPIC_MODEL || "claude-3-5-haiku-latest";
 
-const INPUT_COST_PER_MTOK = Number(process.env.ANTHROPIC_INPUT_COST_PER_MTOK || "0.80");
-const OUTPUT_COST_PER_MTOK = Number(process.env.ANTHROPIC_OUTPUT_COST_PER_MTOK || "4.00");
+export type Provider = "anthropic" | "gemini";
 
-let client: Anthropic | null = null;
+export const ANTHROPIC_MODEL =
+  process.env.ANTHROPIC_MODEL || "claude-3-5-haiku-latest";
+export const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.0-flash";
 
-function anthropic(): Anthropic {
-  if (client) return client;
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) throw new Error("ANTHROPIC_API_KEY is not set.");
-  client = new Anthropic({ apiKey });
-  return client;
+export function activeProvider(): Provider {
+  const p = (process.env.AI_PROVIDER || "").toLowerCase().trim();
+  if (p === "gemini" || p === "google") return "gemini";
+  if (p === "anthropic" || p === "claude") return "anthropic";
+  if (process.env.ANTHROPIC_API_KEY) return "anthropic";
+  if (process.env.GEMINI_API_KEY) return "gemini";
+  return "anthropic";
+}
+
+export function activeModel(): string {
+  return activeProvider() === "gemini" ? GEMINI_MODEL : ANTHROPIC_MODEL;
+}
+
+export function isConfigured(): boolean {
+  return activeProvider() === "gemini"
+    ? Boolean(process.env.GEMINI_API_KEY)
+    : Boolean(process.env.ANTHROPIC_API_KEY);
+}
+
+/** Kept for compatibility with existing imports. */
+export const MODEL = activeModel();
+
+function rates(): { input: number; output: number } {
+  if (activeProvider() === "gemini") {
+    return {
+      input: Number(process.env.GEMINI_INPUT_COST_PER_MTOK || "0"),
+      output: Number(process.env.GEMINI_OUTPUT_COST_PER_MTOK || "0"),
+    };
+  }
+  return {
+    input: Number(process.env.ANTHROPIC_INPUT_COST_PER_MTOK || "0.80"),
+    output: Number(process.env.ANTHROPIC_OUTPUT_COST_PER_MTOK || "4.00"),
+  };
 }
 
 export function estimateCost(inputTokens: number, outputTokens: number): number {
-  return (
-    (inputTokens / 1_000_000) * INPUT_COST_PER_MTOK +
-    (outputTokens / 1_000_000) * OUTPUT_COST_PER_MTOK
-  );
+  const r = rates();
+  return (inputTokens / 1_000_000) * r.input + (outputTokens / 1_000_000) * r.output;
 }
 
 const SYSTEM_PROMPT = `You write short re-engagement emails as Marcus Tate, founder of Greenscape Pro, a high-end residential hardscape and landscape design-build company in Phoenix, Arizona.
@@ -45,9 +77,10 @@ VOICE
 - No marketing language. Never use: "circling back", "touching base", "just checking in", "reaching out", "exciting news", "we'd love to", "at your convenience", "hope this email finds you well".
 - No exclamation marks. No emoji. No bullet points. No headers.
 
-CONTENT RULES — these are hard constraints
+CONTENT RULES - these are hard constraints
 - Never state, quote, estimate, or imply a price. Never offer a discount, a promotion, or free work. Pricing requires a real proposal from a real site walk.
 - Never claim work was completed for them, never invent shared history beyond what the file says, never invent names of people.
+- Never mention a spouse, partner, or family member, even if the internal notes do. Never mention the HOA by name.
 - Never promise a timeline or availability.
 - One clear, low-friction ask: are they still thinking about the project. Make it easy to reply with one line. Do not push a phone call.
 - 90 to 160 words in the body. Sign off as Marcus.
@@ -76,7 +109,9 @@ function buildUserPrompt(lead: Lead): string {
     lead.project_interest ? `Project they wanted: ${lead.project_interest}` : null,
     lead.lost_reason ? `Why it did not close: ${LOST_REASON_LABEL[lead.lost_reason]}` : null,
     monthsSince ? `Months since last contact: ${monthsSince}` : null,
-    lead.notes ? `Notes from the CRM (internal, messy, never quote these back verbatim):\n${lead.notes}` : null,
+    lead.notes
+      ? `Notes from the CRM (internal, messy, never quote these back verbatim):\n${lead.notes}`
+      : null,
   ].filter(Boolean);
 
   return `Write the re-engagement email for this lead.
@@ -94,9 +129,15 @@ export interface GenerationResult {
   costUsd: number;
 }
 
-export async function generateDraft(lead: Lead): Promise<GenerationResult> {
-  const response = await anthropic().messages.create({
-    model: MODEL,
+let anthropicClient: Anthropic | null = null;
+
+async function generateWithAnthropic(lead: Lead): Promise<GenerationResult> {
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) throw new Error("ANTHROPIC_API_KEY is not set.");
+  if (!anthropicClient) anthropicClient = new Anthropic({ apiKey });
+
+  const response = await anthropicClient.messages.create({
+    model: ANTHROPIC_MODEL,
     max_tokens: 700,
     temperature: 0.7,
     system: SYSTEM_PROMPT,
@@ -114,9 +155,66 @@ export async function generateDraft(lead: Lead): Promise<GenerationResult> {
 
   return {
     raw,
-    model: MODEL,
+    model: ANTHROPIC_MODEL,
     inputTokens,
     outputTokens,
     costUsd: estimateCost(inputTokens, outputTokens),
   };
+}
+
+interface GeminiResponse {
+  candidates?: { content?: { parts?: { text?: string }[] }; finishReason?: string }[];
+  usageMetadata?: { promptTokenCount?: number; candidatesTokenCount?: number };
+  error?: { message?: string };
+}
+
+async function generateWithGemini(lead: Lead): Promise<GenerationResult> {
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) throw new Error("GEMINI_API_KEY is not set.");
+
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
+
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
+    body: JSON.stringify({
+      systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
+      contents: [{ role: "user", parts: [{ text: buildUserPrompt(lead) }] }],
+      generationConfig: {
+        temperature: 0.7,
+        maxOutputTokens: 700,
+        responseMimeType: "application/json",
+      },
+    }),
+  });
+
+  const data = (await res.json().catch(() => ({}))) as GeminiResponse;
+
+  if (!res.ok) {
+    throw new Error(
+      `Gemini returned ${res.status}: ${data?.error?.message ?? "no error message"}`
+    );
+  }
+
+  const raw = (data.candidates?.[0]?.content?.parts ?? [])
+    .map((p) => p.text ?? "")
+    .join("")
+    .trim();
+
+  const inputTokens = data.usageMetadata?.promptTokenCount ?? 0;
+  const outputTokens = data.usageMetadata?.candidatesTokenCount ?? 0;
+
+  return {
+    raw,
+    model: GEMINI_MODEL,
+    inputTokens,
+    outputTokens,
+    costUsd: estimateCost(inputTokens, outputTokens),
+  };
+}
+
+export async function generateDraft(lead: Lead): Promise<GenerationResult> {
+  return activeProvider() === "gemini"
+    ? generateWithGemini(lead)
+    : generateWithAnthropic(lead);
 }

@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabase";
-import { MODEL } from "@/lib/anthropic";
+import { activeProvider, activeModel, isConfigured } from "@/lib/anthropic";
 import { isDryRun } from "@/lib/email";
 
 export const dynamic = "force-dynamic";
@@ -25,7 +25,9 @@ export async function GET() {
   return NextResponse.json({
     status: database === "ok" ? "ok" : "degraded",
     database,
-    anthropic: process.env.ANTHROPIC_API_KEY ? `configured (${MODEL})` : "missing",
+    ai: isConfigured()
+      ? `configured (${activeProvider()} \u00b7 ${activeModel()})`
+      : "missing - set ANTHROPIC_API_KEY or GEMINI_API_KEY",
     email: isDryRun() ? "dry-run (no RESEND_API_KEY)" : "configured (resend)",
     slack: process.env.SLACK_WEBHOOK_URL ? "configured" : "not configured",
     timestamp: new Date().toISOString(),
