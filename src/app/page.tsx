@@ -19,12 +19,11 @@ export default async function DashboardPage({
 }: {
   searchParams: { filter?: string };
 }) {
-  const db = supabaseAdmin();
-
   let leads: Lead[] = [];
   let loadError: string | null = null;
 
   try {
+    const db = supabaseAdmin();
     const { data, error } = await db
       .from("leads")
       .select("*")

@@ -13,12 +13,26 @@ let cached: SupabaseClient | null = null;
 export function supabaseAdmin(): SupabaseClient {
   if (cached) return cached;
 
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  // Read SUPABASE_URL first. This value is only ever used on the server, so it
+  // must NOT depend on a NEXT_PUBLIC_ variable: those are inlined at build time,
+  // and a host that withholds build-time access to secrets (Vercel's "Sensitive"
+  // flag, for one) compiles them to undefined. NEXT_PUBLIC_SUPABASE_URL is kept
+  // as a fallback so existing local .env files keep working.
+  const url = (process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL || "").trim();
+  const key = (process.env.SUPABASE_SERVICE_ROLE_KEY || "").trim();
 
   if (!url || !key) {
+    const missing = [
+      !url ? "SUPABASE_URL (or NEXT_PUBLIC_SUPABASE_URL)" : null,
+      !key ? "SUPABASE_SERVICE_ROLE_KEY" : null,
+    ].filter(Boolean).join(" and ");
+    throw new Error(`Supabase is not configured — missing ${missing}.`);
+  }
+
+  if (!/^https:\/\/[a-z0-9-]+\.supabase\.(co|in)$/i.test(url)) {
     throw new Error(
-      "Supabase is not configured. Set NEXT_PUBLIC_SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY."
+      `SUPABASE_URL does not look like a project URL: "${url}". ` +
+      "It must be https://<project-ref>.supabase.co with no trailing slash or path."
     );
   }
 
