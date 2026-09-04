@@ -162,6 +162,46 @@ async function generateWithAnthropic(lead: Lead): Promise<GenerationResult> {
   };
 }
 
+/**
+ * One retry on transport failure, with a timeout.
+ *
+ * A dropped socket or a slow model should not look like a broken agent. HTTP
+ * errors (4xx/5xx) are NOT retried - those are answers, and repeating a bad
+ * request just spends tokens. Only genuine transport failures get a second go.
+ */
+async function fetchWithRetry(
+  url: string,
+  init: RequestInit,
+  timeoutMs = 90_000
+): Promise<Response> {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      return await fetch(url, { ...init, signal: AbortSignal.timeout(timeoutMs) });
+    } catch (err) {
+      lastError = err;
+      const name = err instanceof Error ? err.name : "";
+      if (name === "TimeoutError") {
+        throw new Error(`Model request timed out after ${timeoutMs / 1000}s.`);
+      }
+      if (attempt === 1) {
+        await new Promise((r) => setTimeout(r, 1200));
+        continue;
+      }
+    }
+  }
+  const cause =
+    lastError instanceof Error && lastError.cause
+      ? String((lastError.cause as { code?: string })?.code ?? lastError.cause)
+      : lastError instanceof Error
+        ? lastError.message
+        : String(lastError);
+  throw new Error(
+    `Could not reach the model API after 2 attempts (${cause}). ` +
+      "Check network access and that the API key is valid."
+  );
+}
+
 interface GeminiResponse {
   candidates?: { content?: { parts?: { text?: string }[] }; finishReason?: string }[];
   usageMetadata?: { promptTokenCount?: number; candidatesTokenCount?: number };
@@ -174,7 +214,7 @@ async function generateWithGemini(lead: Lead): Promise<GenerationResult> {
 
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
 
-  const res = await fetch(url, {
+  const res = await fetchWithRetry(url, {
     method: "POST",
     headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
     body: JSON.stringify({
@@ -182,7 +222,13 @@ async function generateWithGemini(lead: Lead): Promise<GenerationResult> {
       contents: [{ role: "user", parts: [{ text: buildUserPrompt(lead) }] }],
       generationConfig: {
         temperature: 0.7,
-        maxOutputTokens: 700,
+        // Generous ceiling on purpose. Gemini's reasoning models spend
+        // "thinking" tokens from this same budget, so a tight limit truncates
+        // the answer mid-sentence and the JSON never closes. The guardrails
+        // catch that, but a caught failure is still a failure. No thinking
+        // config is sent: the field differs across model generations and an
+        // unsupported one is rejected outright, so headroom is the portable fix.
+        maxOutputTokens: 4096,
         responseMimeType: "application/json",
       },
     }),
@@ -196,10 +242,20 @@ async function generateWithGemini(lead: Lead): Promise<GenerationResult> {
     );
   }
 
-  const raw = (data.candidates?.[0]?.content?.parts ?? [])
+  const candidate = data.candidates?.[0];
+  const raw = (candidate?.content?.parts ?? [])
     .map((p) => p.text ?? "")
     .join("")
     .trim();
+
+  // Name the truncation explicitly rather than letting it surface downstream as
+  // a vague "not valid JSON".
+  if (candidate?.finishReason && candidate.finishReason !== "STOP") {
+    throw new Error(
+      `Gemini stopped early (${candidate.finishReason}) - the draft was cut off. ` +
+        "Raise maxOutputTokens or lower the thinking budget."
+    );
+  }
 
   const inputTokens = data.usageMetadata?.promptTokenCount ?? 0;
   const outputTokens = data.usageMetadata?.candidatesTokenCount ?? 0;
