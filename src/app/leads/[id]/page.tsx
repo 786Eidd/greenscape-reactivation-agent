@@ -1,5 +1,4 @@
 import Link from "next/link";
-import { notFound } from "next/navigation";
 import { supabaseAdmin } from "@/lib/supabase";
 import { money, shortDate, monthsAgo, LEAD_STATUS_STYLE, MESSAGE_STATUS_STYLE } from "@/lib/format";
 import { LOST_REASON_LABEL, type Lead, type Message, type EventRow } from "@/lib/types";
@@ -8,26 +7,67 @@ import DraftReview from "./DraftReview";
 export const dynamic = "force-dynamic";
 
 export default async function LeadPage({ params }: { params: { id: string } }) {
-  const db = supabaseAdmin();
+  let lead: Lead | null = null;
+  let messages: Message[] = [];
+  let events: EventRow[] = [];
+  let loadError: string | null = null;
 
-  const { data: lead } = await db.from("leads").select("*").eq("id", params.id).single<Lead>();
-  if (!lead) notFound();
+  try {
+    const db = supabaseAdmin();
 
-  const { data: messageRows } = await db
-    .from("messages")
-    .select("*")
-    .eq("lead_id", params.id)
-    .order("created_at", { ascending: false });
+    // maybeSingle, not single: "no row" is a normal outcome here and should
+    // render a readable message, not surface as an opaque query error.
+    const { data, error } = await db
+      .from("leads")
+      .select("*")
+      .eq("id", params.id)
+      .maybeSingle<Lead>();
+    if (error) throw new Error(`${error.code ?? "db"}: ${error.message}`);
+    lead = data;
 
-  const { data: eventRows } = await db
-    .from("events")
-    .select("*")
-    .eq("lead_id", params.id)
-    .order("created_at", { ascending: false })
-    .limit(20);
 
-  const messages = (messageRows ?? []) as Message[];
-  const events = (eventRows ?? []) as EventRow[];
+    if (lead) {
+      const { data: messageRows, error: mErr } = await db
+        .from("messages")
+        .select("*")
+        .eq("lead_id", params.id)
+        .order("created_at", { ascending: false });
+      if (mErr) throw new Error(`messages ${mErr.code ?? ""}: ${mErr.message}`);
+
+      const { data: eventRows, error: eErr } = await db
+        .from("events")
+        .select("*")
+        .eq("lead_id", params.id)
+        .order("created_at", { ascending: false })
+        .limit(20);
+      if (eErr) throw new Error(`events ${eErr.code ?? ""}: ${eErr.message}`);
+
+      messages = (messageRows ?? []) as Message[];
+      events = (eventRows ?? []) as EventRow[];
+    }
+  } catch (err) {
+    loadError = err instanceof Error ? err.message : "Unknown database error";
+  }
+
+  if (loadError || !lead) {
+    return (
+      <div className="card p-6">
+        <Link href="/" className="text-sm text-ink/50 hover:text-ink">
+          &larr; Back to queue
+        </Link>
+        <h1 className="mt-3 text-lg font-semibold">
+          {loadError ? "Could not load this lead" : "Lead not found"}
+        </h1>
+        <p className="mt-2 text-sm text-ink/70">
+          {loadError ?? "No lead with this id exists in the connected database."}
+        </p>
+        <p className="mt-3 text-xs text-ink/45">
+          Requested id: <code className="rounded bg-black/5 px-1">{params.id}</code>
+        </p>
+      </div>
+    );
+  }
+
   const pendingDraft = messages.find((m) => m.status === "draft") ?? null;
 
   return (

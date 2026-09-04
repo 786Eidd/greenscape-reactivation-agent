@@ -97,3 +97,11 @@ values
    'Patio + pergola', 29000,
    'Closed-lost in 2024 but signed a maintenance contract in June. Active client now — must never receive a reactivation blast.',
    'went_cold','2024-08-02','suppressed','Now an active maintenance client');
+
+-- Stable ids
+-- gen_random_uuid() hands out fresh ids on every re-seed, which silently breaks
+-- every URL, bookmark and open browser tab pointing at a lead. Deriving the id
+-- from the GHL contact id instead makes re-seeding idempotent: the same lead
+-- keeps the same id forever. Safe to run here because the truncate above has
+-- already emptied messages and events, so nothing references these rows yet.
+update public.leads set id = md5(ghl_contact_id)::uuid where ghl_contact_id is not null;

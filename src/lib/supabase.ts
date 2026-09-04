@@ -38,6 +38,17 @@ export function supabaseAdmin(): SupabaseClient {
 
   cached = createClient(url, key, {
     auth: { persistSession: false, autoRefreshToken: false },
+    global: {
+      // Next.js patches global fetch and caches GET responses by default.
+      // supabase-js talks to PostgREST over fetch, so without this every query
+      // can be served from Next's cache instead of the database - which shows
+      // up as stale rows, and as "not found" for records that plainly exist.
+      // `export const dynamic = "force-dynamic"` governs rendering, not fetch,
+      // so it does not cover this. This is an operations dashboard: every read
+      // must be live.
+      fetch: (input: RequestInfo | URL, init?: RequestInit) =>
+        fetch(input, { ...init, cache: "no-store" }),
+    },
   });
   return cached;
 }
